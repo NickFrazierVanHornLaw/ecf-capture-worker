@@ -14,6 +14,7 @@ try {
   console.error("Playwright install failed:", err.message);
 }
 
+// ✅ Capture route
 app.post("/capture", async (req, res) => {
   const { url, caseNumber } = req.body;
   if (!url) return res.status(400).json({ error: "Missing URL" });
@@ -21,26 +22,34 @@ app.post("/capture", async (req, res) => {
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
-    const request = context.request;
+    const page = await browser.newPage();
 
     console.log(`Fetching: ${url}`);
-    const response = await request.get(url);
+    const response = await page.goto(url, { waitUntil: "networkidle" });
 
-    if (!response.ok()) {
-      throw new Error(`HTTP ${response.status()} - ${response.statusText()}`);
+    let buffer;
+    let contentType = response?.headers()?.["content-type"] || "";
+
+    try {
+      // Try reading raw body first (works for PDFs)
+      buffer = await response.body();
+    } catch (err) {
+      // Fallback: page changed context (HTML login redirect, token expired, etc.)
+      console.warn("Primary body fetch failed, falling back to page content...");
+      const html = await page.content();
+      buffer = Buffer.from(html, "utf8");
+      contentType = "text/html; charset=utf-8";
     }
 
-    const buffer = await response.body();
-    const contentType = response.headers()["content-type"] || "application/octet-stream";
-    const filename = `${caseNumber || "ecf"}_${Date.now()}.pdf`;
+    const filename = `${caseNumber || "ecf"}_${Date.now()}.${contentType.includes("pdf") ? "pdf" : "html"}`;
 
     res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
     res.setHeader("Content-Type", contentType);
     res.status(200).send(buffer);
   } catch (err) {
     console.error("Capture failed:", err.message);
-    res.status(500).json({ error: err.message });
+    // Send readable failure message instead of 500
+    res.status(200).json({ success: false, error: "Unopenable or expired link", detail: err.message });
   } finally {
     if (browser) await browser.close();
   }
@@ -48,6 +57,7 @@ app.post("/capture", async (req, res) => {
 
 app.get("/", (_, res) => res.send("✅ ECF Capture Worker is running"));
 app.listen(3000, () => console.log("Listening on port 3000"));
+
 
 
 
