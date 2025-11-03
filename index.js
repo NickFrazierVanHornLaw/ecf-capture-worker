@@ -17,7 +17,7 @@ try {
 // ✅ Capture route
 app.post("/capture", async (req, res) => {
   const { url, caseNumber } = req.body;
-  if (!url) return res.status(400).json({ error: "Missing URL" });
+  if (!url) return res.status(400).json({ success: false, error: "Missing URL" });
 
   let browser;
   try {
@@ -27,29 +27,67 @@ app.post("/capture", async (req, res) => {
     console.log(`Fetching: ${url}`);
     const response = await page.goto(url, { waitUntil: "networkidle" });
 
-    let buffer;
     let contentType = response?.headers()?.["content-type"] || "";
+    let buffer;
 
+    // Try to read body
     try {
-      // Try reading raw body first (works for PDFs)
       buffer = await response.body();
-    } catch (err) {
-      // Fallback: page changed context (HTML login redirect, token expired, etc.)
+    } catch {
       console.warn("Primary body fetch failed, falling back to page content...");
       const html = await page.content();
       buffer = Buffer.from(html, "utf8");
       contentType = "text/html; charset=utf-8";
     }
 
-    const filename = `${caseNumber || "ecf"}_${Date.now()}.${contentType.includes("pdf") ? "pdf" : "html"}`;
+    // If it's HTML, look for iframe src (the real PDF)
+    if (contentType.includes("html")) {
+      const html = buffer.toString();
+      const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
 
-    res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
-    res.setHeader("Content-Type", contentType);
-    res.status(200).send(buffer);
+      if (iframeMatch) {
+        const iframeUrl = new URL(iframeMatch[1], url).href;
+        console.log("Found PDF iframe:", iframeUrl);
+
+        const pdfResp = await page.request.get(iframeUrl);
+        if (pdfResp.ok()) {
+          const pdfBuffer = await pdfResp.body();
+          res.setHeader("Content-Type", "application/pdf");
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename=${caseNumber || "ecf"}_${Date.now()}.pdf`
+          );
+          return res.status(200).send(pdfBuffer);
+        }
+      }
+    }
+
+    // If PDF already
+    if (contentType.includes("pdf") || buffer.slice(0, 4).toString() === "%PDF") {
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=${caseNumber || "ecf"}_${Date.now()}.pdf`
+      );
+      return res.status(200).send(buffer);
+    }
+
+    // Otherwise return structured JSON for redirects or login pages
+    const htmlSnippet = buffer.toString().slice(0, 400);
+    return res.status(200).json({
+      success: false,
+      status: "expired_or_redirect",
+      message: "Document already opened or expired",
+      preview: htmlSnippet
+    });
   } catch (err) {
     console.error("Capture failed:", err.message);
-    // Send readable failure message instead of 500
-    res.status(200).json({ success: false, error: "Unopenable or expired link", detail: err.message });
+    return res.status(200).json({
+      success: false,
+      status: "error",
+      message: "Unopenable or expired link",
+      detail: err.message
+    });
   } finally {
     if (browser) await browser.close();
   }
