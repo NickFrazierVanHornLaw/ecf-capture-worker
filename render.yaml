@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ecf-capture-worker
+    env: node
+    buildCommand: |
+      npm install
+      npx playwright install --with-deps chromium
+    startCommand: npm start
+    plan: free
